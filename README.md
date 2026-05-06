@@ -2,9 +2,51 @@
 
 [中文](README.md) | [English](README_EN.md)
 
-Python **监控与调价**程序：您在 [Polymarket](https://docs.polymarket.com/api-reference/introduction) 前端**手动挂单**，本程序**不会新建订单**，只轮询该 API 密钥下的**未成交订单**，按**订单簿 + 激励半宽 δ** 的**简化规则**做 **保持 / 撤单 / 同量改价重挂**。
+## Polymarket LP Tool 2.0（重点说明）
+
+- 本项目已升级为 **Polymarket LP Tool 2.0**。
+- 2.0 核心实现语言升级为 **Rust**，后续功能与性能优化将持续优先更新 Rust 版本。
+- **Python 版本不会删除**，将继续保留在仓库中，作为学习参考与历史实现对照。
+
+Python **监控与调价**程序（保留参考）：您在 [Polymarket](https://docs.polymarket.com/api-reference/introduction) 前端**手动挂单**，本程序**不会新建订单**，只轮询该 API 密钥下的**未成交订单**，按**订单簿 + 激励半宽 δ** 的**简化规则**做 **保持 / 撤单 / 同量改价重挂**。
 
 这不是自动做市机器人。
+
+## Rust 版本（WebSocket 优先，实验中）
+
+仓库已新增 Rust 重写版本：`rust_mm_bot/`。
+
+- 定位更新：该版本即 **Polymarket LP Tool 2.0** 的主实现方向。
+- 未来更新：后续将持续对 Rust 版本迭代（稳定性、并发、执行安全、可观测性）。
+- Python 保留策略：Python 主程序保留在仓库，不做删除，供学习参考和行为回归对照。
+- 目标：在尽量保持当前策略行为的前提下，提升并发、稳定性与 WebSocket 响应速度（**不是重写策略思想**）。
+- 架构：`tokio + reqwest + tokio-tungstenite + serde + tracing`，并按模块拆分（pricing/execution/risk/telegram/persistence 等）。
+- 策略哲学：仍以**确定性简单规则**为主（粗 tick / 细 tick / 自定义规则），风险指标主要用于告警与监控，不做激进干预。
+- 反狙击保护：加入 midpoint jump filter、稳定确认、EMA/中位数过滤、fill 后 cooldown、单次最大追价限制。
+- 持久化：自定义规则与策略状态支持落盘（JSON）。
+
+运行（Rust）：
+
+```bash
+cd "/home/ubuntu/polymarket_lp_tool/rust_mm_bot"
+PASSIVE_UI_MODE=web PASSIVE_DASHBOARD_AUTO_OPEN=true RUST_LOG=info cargo run
+```
+
+> 说明：当前 README 其余章节主要描述 Python 主程序（`run_passive_bot.py`）。Rust 版细节见 `rust_mm_bot/README.md` 与 `rust_mm_bot/.env.example`。
+
+### Python / Rust 行为对照（当前）
+
+| 能力 | Python 主程序 | Rust 版本（`rust_mm_bot`） |
+| --- | --- | --- |
+| 默认调价（粗/细 tick） | ✅ 已实盘逻辑 | ✅ 按同一哲学实现（确定性规则） |
+| 自定义规则（token+side） | ✅ Telegram/Web/JSON | ✅ 规则存储与命令流程已接入 |
+| WebSocket 优先事件流 | ⚠️ WS+REST 混合 | ✅ market/user channel 优先，REST 对账 |
+| 风险监控（fill/depth/scoring） | ✅ 监控+告警 | ✅ 指标骨架已接入（持续细化中） |
+| 反狙击保护 | ⚠️ 以策略约束为主 | ✅ jump filter / 稳定确认 / EMA+median / cooldown / max chase |
+| 执行安全（幂等/重试/post-only） | ✅ | ✅ |
+| Telegram `/status` `/orders` `/pnl` `/set_rule` | ✅ | ✅（FSM + `/input`） |
+| Web 控制台 | ✅ | ❌（暂未迁移） |
+| 生产状态 | ✅ 主线 | ⚠️ 实验中，建议先小额回放/仿真验证 |
 
 @臭臭Panda 推特/X ： https://x.com/Chosmos110
 
@@ -148,6 +190,17 @@ cp .env.example .env
 
 `.env` 已在 `.gitignore` 中忽略。
 
+### Rust 版本环境变量（`rust_mm_bot/.env.example`）
+
+Rust 版与 Python 版可共用部分交易账户变量，但建议单独维护一份 `.env` 做 A/B 验证。关键项：
+
+- 交易与连接：`POLYMARKET_HOST`、`POLYMARKET_CHAIN_ID`、`POLYMARKET_FUNDER`
+- API 鉴权：`POLYMARKET_API_KEY`、`POLYMARKET_API_SECRET`、`POLYMARKET_API_PASSPHRASE`
+- WS 地址：`PASSIVE_WS_MARKET_URL`、`PASSIVE_WS_USER_URL`
+- 调价参数：`PASSIVE_CUSTOM_*`、`PASSIVE_DEFAULT_CUSTOM_PRICING`
+- 反狙击参数：`PASSIVE_MID_JUMP_THRESHOLD`、`PASSIVE_MID_JUMP_PAUSE_MS`、`PASSIVE_MID_STABLE_CONFIRM_MS`、`PASSIVE_MAX_REPRICE_TICKS_PER_UPDATE`、`PASSIVE_FILL_COOLDOWN_MS`
+- Telegram：`TELEGRAM_ENABLED`、`TELEGRAM_BOT_TOKEN`、`TELEGRAM_CHAT_ID`
+
 ### 与主循环强相关（`PASSIVE_*`）
 
 完整列表与默认值见 `passive_liquidity/config_manager.py` → `PassiveConfig.from_env()`。常用项：
@@ -196,6 +249,8 @@ cp .env.example .env
 1. 在 Polymarket 用**同一 API 密钥**手动挂好限价单。  
 2. 启动程序；若无未成交单，会 idle，**不会下单**。
 
+### Python 主程序
+
 ```bash
 cd polymarket_lp_tool
 python run_passive_bot.py
@@ -206,6 +261,15 @@ python run_passive_bot.py
 ```bash
 python -m passive_liquidity.main_loop
 ```
+
+### Rust 版本（实验）
+
+```bash
+cd "/home/ubuntu/polymarket_lp_tool/rust_mm_bot"
+PASSIVE_UI_MODE=web PASSIVE_DASHBOARD_AUTO_OPEN=true RUST_LOG=info cargo run
+```
+
+建议先用小资金与低风险市场验证一段时间，再逐步替换 Python 主程序。
 
 ### Web 控制台（可选）
 

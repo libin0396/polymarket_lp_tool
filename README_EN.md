@@ -2,11 +2,52 @@
 
 [中文](README.md) | [English](README_EN.md)
 
-Python monitoring and repricing tool for existing Polymarket orders.
+## Polymarket LP Tool 2.0 (Key Message)
+
+- This project is now upgraded to **Polymarket LP Tool 2.0**.
+- In 2.0, the core implementation language is **Rust**. Future feature and performance updates will prioritize the Rust version.
+- The **Python version will not be deleted**. It remains in this repo for learning reference and historical behavior comparison.
+
+Python monitoring and repricing tool (kept for reference) for existing Polymarket orders.
 You manually place limit orders on the Polymarket frontend; this program does **not** create initial orders.
 It only polls **open orders** under your API key and applies simplified actions (**keep / cancel / cancel+replace with same size**) based on **order book + reward half-width delta**.
 
 This is **not** a fully automated market-making bot.
+
+## Rust Version (WebSocket-first, Experimental)
+
+This repo now includes a Rust rewrite at `rust_mm_bot/`.
+
+- Positioning update: this is the main implementation direction of **Polymarket LP Tool 2.0**.
+- Future updates: Rust version will continue to receive ongoing improvements (stability, concurrency, execution safety, observability).
+- Python retention policy: Python mainline remains in the repository and will not be removed, for learning/reference and behavior parity checks.
+- Goal: improve concurrency, long-run stability, and WS responsiveness while preserving strategy behavior (not redesigning strategy).
+- Stack: `tokio + reqwest + tokio-tungstenite + serde + tracing`, modularized by pricing/execution/risk/telegram/persistence/runtime.
+- Philosophy: deterministic coarse/fine pricing first; risk metrics primarily for alerting/monitoring.
+- Anti-sniping: midpoint jump pause, stable-mid confirmation, EMA/median filtered midpoint, post-fill cooldown, max repricing distance per update.
+
+Run Rust:
+
+```bash
+cd "/home/ubuntu/polymarket_lp_tool/rust_mm_bot"
+PASSIVE_UI_MODE=web PASSIVE_DASHBOARD_AUTO_OPEN=true RUST_LOG=info cargo run
+```
+
+For Rust details, see `rust_mm_bot/README.md` and `rust_mm_bot/.env.example`.
+
+### Python vs Rust Parity (Current)
+
+| Capability | Python mainline | Rust (`rust_mm_bot`) |
+| --- | --- | --- |
+| Default coarse/fine pricing | ✅ production logic | ✅ same philosophy implemented |
+| Per-token+side custom rules | ✅ Telegram/Web/JSON | ✅ store + command flow integrated |
+| WebSocket-first event model | ⚠️ mixed WS + REST | ✅ market/user channels first + REST reconciliation |
+| Risk monitoring (fill/depth/scoring) | ✅ | ✅ framework integrated (ongoing refinement) |
+| Anti-sniping protections | ⚠️ mainly implicit constraints | ✅ jump filter + stable confirm + EMA/median + cooldown + max chase |
+| Safe execution (idempotent/retry/post-only) | ✅ | ✅ |
+| Telegram `/status /orders /pnl /set_rule` | ✅ | ✅ (FSM + `/input`) |
+| Web panel | ✅ | ❌ not ported yet |
+| Production readiness | ✅ | ⚠️ experimental, validate with small size first |
 
 Author X/Twitter: [@臭臭Panda](https://x.com/Chosmos110)  
 Referral (optional): <https://polymarket.com/?r=xiaochouchou>
@@ -169,6 +210,19 @@ cp .env.example .env
 
 `.env` is ignored by Git.
 
+### Rust Env (`rust_mm_bot/.env.example`)
+
+You can share some account vars with Python, but for safe A/B testing it is better to keep a separate Rust `.env`.
+
+Key groups:
+
+- Trading/connectivity: `POLYMARKET_HOST`, `POLYMARKET_CHAIN_ID`, `POLYMARKET_FUNDER`
+- API auth: `POLYMARKET_API_KEY`, `POLYMARKET_API_SECRET`, `POLYMARKET_API_PASSPHRASE`
+- WS endpoints: `PASSIVE_WS_MARKET_URL`, `PASSIVE_WS_USER_URL`
+- Pricing knobs: `PASSIVE_CUSTOM_*`, `PASSIVE_DEFAULT_CUSTOM_PRICING`
+- Anti-sniping knobs: `PASSIVE_MID_JUMP_THRESHOLD`, `PASSIVE_MID_JUMP_PAUSE_MS`, `PASSIVE_MID_STABLE_CONFIRM_MS`, `PASSIVE_MAX_REPRICE_TICKS_PER_UPDATE`, `PASSIVE_FILL_COOLDOWN_MS`
+- Telegram: `TELEGRAM_ENABLED`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`
+
 ### Main Loop Related (`PASSIVE_*`)
 
 See `PassiveConfig.from_env()` in `passive_liquidity/config_manager.py` for full list.
@@ -205,6 +259,8 @@ To disable fill alerts, set `PASSIVE_TELEGRAM_NOTIFY_FILL=false` (or partial/ful
 1. Place manual limit orders on Polymarket using the same API key.
 2. Start the bot. If there are no open orders, it stays idle and does not place initial orders.
 
+### Python Mainline
+
 ```bash
 cd polymarket_lp_tool
 python run_passive_bot.py
@@ -215,6 +271,15 @@ or
 ```bash
 python -m passive_liquidity.main_loop
 ```
+
+### Rust (Experimental)
+
+```bash
+cd "/home/ubuntu/polymarket_lp_tool/rust_mm_bot"
+PASSIVE_UI_MODE=web PASSIVE_DASHBOARD_AUTO_OPEN=true RUST_LOG=info cargo run
+```
+
+Recommended: run with small exposure first, then gradually promote from shadow mode to live replacement.
 
 ## Web Panel (Optional)
 
