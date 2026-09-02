@@ -55,3 +55,35 @@ impl RewardsClient {
         Ok(v)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_current_markets, parse_market_detail};
+
+    #[test]
+    fn parses_current_reward_market_for_ranking() {
+        let markets = parse_current_markets(
+            r#"{"data":[{"condition_id":"condition","rewards_max_spread":5.5,"rewards_min_size":20,"total_daily_rate":12}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(markets.len(), 1);
+        assert_eq!(markets[0].condition_id, "condition");
+        assert_eq!(markets[0].rewards_max_spread_cents, 5.5);
+        assert_eq!(markets[0].rewards_min_size, 20.0);
+        assert_eq!(markets[0].daily_rate, 12.0);
+    }
+
+    #[test]
+    fn parses_market_detail_tokens_for_discovery() {
+        let market = parse_market_detail(
+            r#"{"data":[{"condition_id":"condition","question":"Q","tokens":[{"token_id":"yes","outcome":"Yes"},{"token_id":"no","outcome":"No"}],"rewards_max_spread":5.5,"rewards_min_size":20}]}"#,
+        )
+        .unwrap();
+
+        assert_eq!(market.condition_id, "condition");
+        assert_eq!(market.tokens.len(), 2);
+        assert_eq!(market.tokens[0].token_id, "yes");
+        assert_eq!(market.tokens[1].outcome, "No");
+    }
+}
