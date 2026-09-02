@@ -172,4 +172,12 @@ mod tests {
 
         assert!(planner().plan(&[input], 95.0).is_empty());
     }
+
+    #[test]
+    fn live_mode_requires_exact_confirmation() {
+        assert!(!super::live_enabled("live", ""));
+        assert!(!super::live_enabled("live", "I understand"));
+        assert!(super::live_enabled("live", "I_UNDERSTAND"));
+        assert!(!super::live_enabled("shadow", "I_UNDERSTAND"));
+    }
 }
