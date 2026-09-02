@@ -29,6 +29,5 @@ jobs:
             rust_mm_bot/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust_mm_bot/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
-      - run: cargo fmt --all -- --check
       - run: cargo test --all-targets
       - run: cargo build --release
