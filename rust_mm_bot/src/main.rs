@@ -16,13 +16,14 @@ mod websocket;
 mod tui;
 
 use anyhow::Result;
+use auto_quote::{live_enabled, QuoteInput, QuotePlanner};
 use chrono::Utc;
 use config::load_config;
 use custom_rules::CustomRulesStore;
 use dashboard::{read_memory_mb_from_proc, run_dashboard_server, DashboardStateHandle, OrderDashboardRow};
 use execution_engine::ExecutionEngine;
 use market_resolver::MarketResolver;
-use models::{CustomPricingSettings, EngineEvent, ExecutionRequest, Order, PricingMode};
+use models::{CustomPricingSettings, EngineEvent, ExecutionRequest, Order, PricingDecision, PricingMode};
 use persistence::{load_state, save_state, PersistedState};
 use polymarket_api::PolymarketApi;
 use pricing_engine::PricingEngine;
@@ -59,15 +60,34 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = load_config()?;
+    let auto_mode = cfg.auto_mode.trim().to_ascii_lowercase();
+    let auto_enabled = matches!(auto_mode.as_str(), "shadow" | "live");
+    let auto_live = live_enabled(&auto_mode, &cfg.auto_live_confirmation);
+    if auto_mode == "live" && !auto_live {
+        warn!("automatic live mode requested without PASSIVE_AUTO_LIVE_CONFIRM=I_UNDERSTAND; running shadow-only");
+    }
+    if !auto_mode.is_empty() && !matches!(auto_mode.as_str(), "off" | "shadow" | "live") {
+        warn!("unknown PASSIVE_AUTO_MODE={}; automatic quoting disabled", auto_mode);
+    }
+    let auto_planner = QuotePlanner::new(
+        cfg.auto_max_capital_usdc,
+        cfg.auto_max_order_usdc,
+        cfg.auto_max_markets,
+        cfg.auto_min_daily_rate,
+    );
     info!(
-        "startup config loaded host={} chain_id={} ws_market={} ws_user={} telegram_enabled={} post_only={} loop_interval_ms={}",
+        "startup config loaded host={} chain_id={} ws_market={} ws_user={} telegram_enabled={} post_only={} loop_interval_ms={} auto_mode={} auto_capital_usdc={} auto_order_usdc={} auto_markets={}",
         cfg.clob_http_url,
         cfg.chain_id,
         cfg.ws_market_url,
         cfg.ws_user_url,
         cfg.telegram_enabled,
         cfg.post_only,
-        cfg.loop_interval_ms
+        cfg.loop_interval_ms,
+        auto_mode,
+        cfg.auto_max_capital_usdc,
+        cfg.auto_max_order_usdc,
+        cfg.auto_max_markets
     );
     info!(
         "dashboard enabled={} bind={}",
@@ -337,6 +357,7 @@ async fn main() -> Result<()> {
     let mut tick_cache = HashMap::<String, f64>::new();
     let mut tick_cache_at = HashMap::<String, Instant>::new();
     let mut order_next_due_at = HashMap::<String, Instant>::new();
+    let mut auto_next_scan_at = Instant::now();
 
     loop {
         let Some(event) = rx.recv().await else {
@@ -386,6 +407,121 @@ async fn main() -> Result<()> {
                 // Parallel IO prefetch + cache:
                 // midpoint (short TTL) and tick-size (long TTL) by unique token.
                 let now = Instant::now();
+                if auto_enabled && now >= auto_next_scan_at {
+                    auto_next_scan_at = now
+                        + StdDuration::from_millis(cfg.auto_scan_interval_ms.max(1));
+                    let committed_usdc = orders
+                        .iter()
+                        .map(|order| (order.price * order.remaining_size()).max(0.0))
+                        .sum::<f64>();
+                    let open_token_ids = orders
+                        .iter()
+                        .map(|order| order.token_id.as_str())
+                        .collect::<HashSet<_>>();
+                    let mut auto_inputs = Vec::<QuoteInput>::new();
+                    match rewards.current_markets().await {
+                        Ok(markets) => {
+                            for market in markets.into_iter().take(cfg.auto_max_markets.max(1)) {
+                                let detail = match rewards.market_detail(&market.condition_id).await {
+                                    Ok(detail) => detail,
+                                    Err(err) => {
+                                        warn!(
+                                            "automatic market detail failed condition={} err={}",
+                                            market.condition_id, err
+                                        );
+                                        continue;
+                                    }
+                                };
+                                for token in detail.tokens {
+                                    if open_token_ids.contains(token.token_id.as_str()) {
+                                        continue;
+                                    }
+                                    let book = if let Some(book) = order_books.get(&token.token_id).cloned() {
+                                        Some(book)
+                                    } else {
+                                        match api.get_book_snapshot(&token.token_id).await {
+                                            Ok(book) => {
+                                                if let Some(book) = &book {
+                                                    order_books.insert(token.token_id.clone(), book.clone());
+                                                }
+                                                book
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "automatic book lookup failed token={} err={}",
+                                                    token.token_id, err
+                                                );
+                                                None
+                                            }
+                                        }
+                                    };
+                                    let midpoint = book
+                                        .as_ref()
+                                        .and_then(|book| book.mid())
+                                        .or(token.price)
+                                        .or(api.get_midpoint(&token.token_id).await.ok().flatten());
+                                    let tick_size = book
+                                        .as_ref()
+                                        .map(|book| book.tick_size)
+                                        .or(api.get_tick_size(&token.token_id).await.ok());
+                                    if let (Some(midpoint), Some(tick_size)) = (midpoint, tick_size) {
+                                        auto_inputs.push(QuoteInput {
+                                            condition_id: market.condition_id.clone(),
+                                            token_id: token.token_id,
+                                            midpoint,
+                                            tick_size,
+                                            rewards_max_spread_cents: market.rewards_max_spread_cents,
+                                            rewards_min_size: market.rewards_min_size,
+                                            daily_rate: market.daily_rate,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        Err(err) => warn!("automatic reward market scan failed: {}", err),
+                    }
+                    let plans = auto_planner.plan(&auto_inputs, committed_usdc);
+                    for plan in plans {
+                        if auto_live {
+                            match api
+                                .post_order(
+                                    &plan.token_id,
+                                    plan.side,
+                                    plan.price,
+                                    plan.size,
+                                    cfg.post_only,
+                                )
+                                .await
+                            {
+                                Ok(order_id) => info!(
+                                    "automatic live order submitted condition={} token={} side={} price={} size={} notional={} order_id={}",
+                                    plan.condition_id,
+                                    plan.token_id,
+                                    plan.side.as_str(),
+                                    plan.price,
+                                    plan.size,
+                                    plan.notional,
+                                    order_id
+                                ),
+                                Err(err) => warn!(
+                                    "automatic live order rejected condition={} token={} err={}",
+                                    plan.condition_id, plan.token_id, err
+                                ),
+                            }
+                        } else {
+                            info!(
+                                "automatic shadow quote condition={} token={} side={} price={} size={} notional={} daily_rate={}",
+                                plan.condition_id,
+                                plan.token_id,
+                                plan.side.as_str(),
+                                plan.price,
+                                plan.size,
+                                plan.notional,
+                                plan.daily_rate
+                            );
+                        }
+                    }
+                }
                 let unique_tokens = orders
                     .iter()
                     .map(|o| o.token_id.clone())
@@ -440,16 +576,25 @@ async fn main() -> Result<()> {
                 }
 
                 // Rewards: one fetch per unique condition id (RewardsClient has its own cache).
-                let mut rewards_spread_map = HashMap::<String, f64>::new();
+                let mut rewards_spread_map = HashMap::<String, Option<f64>>::new();
                 let unique_conditions = orders
                     .iter()
                     .map(|o| o.condition_id.clone())
                     .collect::<HashSet<_>>();
                 for condition_id in unique_conditions {
-                    let spread = rewards
+                    let spread = match rewards
                         .rewards_max_spread_for_market(&condition_id)
                         .await
-                        .unwrap_or(0.0);
+                    {
+                        Ok(spread) => spread,
+                        Err(err) => {
+                            warn!(
+                                "reward lookup failed condition={} err={}",
+                                condition_id, err
+                            );
+                            None
+                        }
+                    };
                     rewards_spread_map.insert(condition_id, spread);
                 }
 
@@ -494,7 +639,10 @@ async fn main() -> Result<()> {
                         }
                     }
 
-                    let rewards_spread = *rewards_spread_map.get(&order.condition_id).unwrap_or(&0.0);
+                    let rewards_spread = rewards_spread_map
+                        .get(&order.condition_id)
+                        .copied()
+                        .flatten();
                     let provisional_mid = if let Some(m) = midpoint_cache.get(&order.token_id).copied() {
                         Some(m)
                     } else {
@@ -505,10 +653,10 @@ async fn main() -> Result<()> {
                     } else {
                         tick_cache.get(&order.token_id).copied().or(Some(0.01))
                     };
-                    let (provisional_lo, provisional_hi) = if let Some(mid) = provisional_mid {
-                        let delta = rewards::RewardsClient::reward_range(mid, rewards_spread)
-                            .delta
-                            .max(1e-9);
+                    let (provisional_lo, provisional_hi) = if let (Some(mid), Some(spread)) =
+                        (provisional_mid, rewards_spread)
+                    {
+                        let delta = rewards::RewardsClient::reward_range(mid, spread).delta;
                         match order.side {
                             models::Side::Buy => (Some(mid - delta), Some(mid)),
                             models::Side::Sell => (Some(mid), Some(mid + delta)),
@@ -546,11 +694,43 @@ async fn main() -> Result<()> {
                                 .map(classify_tick_regime_label)
                                 .unwrap_or("pending")
                                 .to_string(),
-                            last_decision_reason: "waiting_for_orderbook".to_string(),
+                            last_decision_reason: if rewards_spread.is_some() {
+                                "waiting_for_orderbook".to_string()
+                            } else {
+                                "reward_unavailable_fail_closed".to_string()
+                            },
                             last_check_at: Some(Utc::now()),
                             last_candidate_levels: vec![],
                         })
                         .await;
+
+                    let Some(rewards_spread) = rewards_spread else {
+                        let decision = PricingDecision {
+                            action: models::DecisionAction::Cancel,
+                            reason: "reward_unavailable_fail_closed".to_string(),
+                            mode: PricingMode::Default,
+                            regime: models::TickRegime::Unsupported,
+                            candidate_prices: vec![],
+                            chosen_target: None,
+                            risk_overlay: None,
+                        };
+                        let req = ExecutionRequest {
+                            order_id: order.id.clone(),
+                            token_id: order.token_id.clone(),
+                            side: order.side,
+                            old_price: order.price,
+                            size: order.remaining_size(),
+                            decision,
+                            ts: Utc::now(),
+                        };
+                        if let Err(err) = execution_engine.apply(&api, req, cfg.post_only).await {
+                            error!(
+                                "fail-closed reward cancellation failed token={} order_id={} err={}",
+                                order.token_id, order.id, err
+                            );
+                        }
+                        continue;
+                    };
 
                     let Some(book) = order_books.get(&order.token_id) else {
                         continue;
@@ -568,7 +748,7 @@ async fn main() -> Result<()> {
                             .unwrap_or(order.price)
                     };
                     let reward = rewards::RewardsClient::reward_range(mid_for_reward, rewards_spread);
-                    let delta = reward.delta.max(1e-9);
+                    let delta = reward.delta;
                     let (raw_lo, raw_hi) = match order.side {
                         models::Side::Buy => (mid_for_reward - delta, mid_for_reward),
                         models::Side::Sell => (mid_for_reward, mid_for_reward + delta),

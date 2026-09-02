@@ -1,4 +1,5 @@
 use crate::models::Side;
+use std::collections::HashSet;
 
 #[derive(Debug, Clone)]
 pub struct QuoteInput {
@@ -28,6 +29,10 @@ pub struct QuotePlanner {
     max_order_usdc: f64,
     max_markets: usize,
     min_daily_rate: f64,
+}
+
+pub fn live_enabled(mode: &str, confirmation: &str) -> bool {
+    mode.eq_ignore_ascii_case("live") && confirmation == "I_UNDERSTAND"
 }
 
 impl QuotePlanner {
@@ -63,10 +68,10 @@ impl QuotePlanner {
         let mut remaining = (self.max_capital_usdc - committed).max(0.0);
         let mut candidates = inputs.iter().collect::<Vec<_>>();
         candidates.sort_by(|a, b| b.daily_rate.total_cmp(&a.daily_rate));
+        let mut used_conditions = HashSet::new();
 
         candidates
             .into_iter()
-            .take(self.max_markets)
             .filter_map(|input| {
                 if input.condition_id.is_empty()
                     || input.token_id.is_empty()
@@ -82,6 +87,9 @@ impl QuotePlanner {
                     || input.rewards_min_size <= 0.0
                     || input.daily_rate < self.min_daily_rate
                 {
+                    return None;
+                }
+                if !used_conditions.insert(input.condition_id.as_str()) {
                     return None;
                 }
 
@@ -110,6 +118,7 @@ impl QuotePlanner {
                     daily_rate: input.daily_rate,
                 })
             })
+            .take(self.max_markets)
             .collect()
     }
 }

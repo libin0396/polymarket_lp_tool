@@ -49,6 +49,13 @@ pub struct Config {
     pub dashboard_bind: String,
     pub ui_mode: String,
     pub dashboard_auto_open: bool,
+    pub auto_mode: String,
+    pub auto_max_capital_usdc: f64,
+    pub auto_max_order_usdc: f64,
+    pub auto_max_markets: usize,
+    pub auto_min_daily_rate: f64,
+    pub auto_scan_interval_ms: u64,
+    pub auto_live_confirmation: String,
 }
 
 fn parse_bool(key: &str, default: bool) -> bool {
@@ -188,5 +195,12 @@ pub fn load_config() -> Result<Config> {
             .unwrap_or_else(|_| "127.0.0.1:8787".to_string()),
         ui_mode,
         dashboard_auto_open: parse_bool("PASSIVE_DASHBOARD_AUTO_OPEN", false),
+        auto_mode: env::var("PASSIVE_AUTO_MODE").unwrap_or_else(|_| "off".to_string()),
+        auto_max_capital_usdc: parse_f64("PASSIVE_AUTO_MAX_CAPITAL_USDC", 100.0),
+        auto_max_order_usdc: parse_f64("PASSIVE_AUTO_MAX_ORDER_USDC", 10.0),
+        auto_max_markets: parse_usize("PASSIVE_AUTO_MAX_MARKETS", 5),
+        auto_min_daily_rate: parse_f64("PASSIVE_AUTO_MIN_DAILY_RATE", 1.0),
+        auto_scan_interval_ms: parse_u64("PASSIVE_AUTO_SCAN_INTERVAL_MS", 30_000),
+        auto_live_confirmation: env::var("PASSIVE_AUTO_LIVE_CONFIRM").unwrap_or_default(),
     })
 }
