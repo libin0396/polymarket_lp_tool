@@ -2,6 +2,7 @@ mod config;
 mod custom_rules;
 mod dashboard;
 mod execution_engine;
+mod auto_quote;
 mod market_resolver;
 mod models;
 mod orderbook;
