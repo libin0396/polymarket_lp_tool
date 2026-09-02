@@ -14,6 +14,8 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
+    env:
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     defaults:
       run:
         working-directory: rust_mm_bot
@@ -30,10 +32,13 @@ jobs:
             rust_mm_bot/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('rust_mm_bot/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+      - run: sudo apt-get update
+      - run: sudo apt-get install --yes musl-tools
+      - run: rustup target add x86_64-unknown-linux-musl
       - run: cargo test --all-targets
-      - run: cargo build --release
+      - run: cargo build --release --target x86_64-unknown-linux-musl
       - uses: actions/upload-artifact@v4
         with:
-          name: polymarket-lp-rust-linux-x86_64
-          path: rust_mm_bot/target/release/polymarket_lp_rust_bot
+          name: polymarket-lp-rust-linux-x86_64-musl
+          path: rust_mm_bot/target/x86_64-unknown-linux-musl/release/polymarket_lp_rust_bot
           if-no-files-found: error
