@@ -9,6 +9,22 @@ Rust rewrite of the existing passive LP market-making bot, with behavior aligned
 - Telegram command and rule flow
 - long-running persistence for rules and cooldown state
 
+## Automatic mode
+
+Automatic discovery and quote planning are disabled by default:
+
+```dotenv
+PASSIVE_AUTO_MODE=shadow
+PASSIVE_AUTO_MAX_CAPITAL_USDC=100
+PASSIVE_AUTO_MAX_ORDER_USDC=10
+PASSIVE_AUTO_MAX_MARKETS=5
+PASSIVE_AUTO_MIN_DAILY_RATE=1
+```
+
+`shadow` scans reward markets and logs candidate BUY quotes without placing orders. `live` additionally requires `PASSIVE_AUTO_LIVE_CONFIRM=I_UNDERSTAND`; validate signing, balances, inventory, and settlement with a small account first.
+
+GitHub Actions builds and uploads the Linux release binary as an artifact, so a local Rust toolchain is not required.
+
 ## Modules
 
 - `config`: `.env` parsing and runtime config

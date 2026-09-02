@@ -9,6 +9,7 @@ on:
     paths:
       - "rust_mm_bot/**"
       - ".github/workflows/rust.yml"
+  workflow_dispatch:
 
 jobs:
   check:
@@ -31,3 +32,8 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
       - run: cargo test --all-targets
       - run: cargo build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: polymarket-lp-rust-linux-x86_64
+          path: rust_mm_bot/target/release/polymarket_lp_rust_bot
+          if-no-files-found: error
